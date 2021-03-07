@@ -17,14 +17,16 @@
 # limitations under the License.
 ################################################################################
 
-bin=`dirname "$0"`
+#$0 Shell文件本身的文件名
+bin=`dirname "$0"`       
 bin=`cd "$bin"; pwd`
 
+#读取并加载/conf/目录下所有的配置文件/环境变量
 . "$bin"/config.sh
 
 # Start the JobManager instance(s)
-shopt -s nocasematch
-if [[ $HIGH_AVAILABILITY == "zookeeper" ]]; then
+shopt -s nocasematch      #设置Bash在对比样式时忽略大小写
+if [[ $HIGH_AVAILABILITY == "zookeer" ]]; then
     # HA Mode
     readMasters
 
@@ -47,6 +49,7 @@ else
     # Start single JobManager on this machine
     "$FLINK_BIN_DIR"/jobmanager.sh start
 fi
+#关闭大小写忽略
 shopt -u nocasematch
 
 # Start TaskManager instance(s)

@@ -25,10 +25,9 @@ STAGE_BLINK_PLANNER="blink_planner"
 STAGE_CONNECTORS="connectors"
 STAGE_KAFKA_GELLY="kafka/gelly"
 STAGE_TESTS="tests"
-STAGE_LEGACY_SCHEDULER_CORE="legacy_scheduler_core"
-STAGE_LEGACY_SCHEDULER_TESTS="legacy_scheduler_tests"
 STAGE_MISC="misc"
 STAGE_CLEANUP="cleanup"
+STAGE_FINEGRAINED_RESOURCE_MANAGEMENT="finegrained_resource_management"
 
 MODULES_CORE="\
 flink-annotations,\
@@ -44,18 +43,21 @@ flink-scala,\
 flink-streaming-java,\
 flink-streaming-scala,\
 flink-metrics,\
-flink-metrics/flink-metrics-core"
+flink-metrics/flink-metrics-core,\
+flink-external-resources,\
+flink-external-resources/flink-external-resource-gpu"
 
 MODULES_LIBRARIES="\
 flink-libraries/flink-cep,\
 flink-libraries/flink-cep-scala,\
 flink-libraries/flink-state-processing-api,\
+flink-table/flink-sql-parser,\
+flink-table/flink-sql-parser-hive,\
 flink-table/flink-table-common,\
 flink-table/flink-table-api-java,\
 flink-table/flink-table-api-scala,\
 flink-table/flink-table-api-java-bridge,\
 flink-table/flink-table-api-scala-bridge,\
-flink-table/flink-table-planner,\
 flink-table/flink-sql-client"
 
 MODULES_BLINK_PLANNER="\
@@ -72,7 +74,6 @@ flink-filesystems/flink-oss-fs-hadoop,\
 flink-filesystems/flink-s3-fs-base,\
 flink-filesystems/flink-s3-fs-hadoop,\
 flink-filesystems/flink-s3-fs-presto,\
-flink-filesystems/flink-swift-fs-hadoop,\
 flink-fs-tests,\
 flink-formats,\
 flink-formats/flink-avro-confluent-registry,\
@@ -83,11 +84,13 @@ flink-formats/flink-json,\
 flink-formats/flink-csv,\
 flink-formats/flink-orc,\
 flink-formats/flink-orc-nohive,\
-flink-connectors/flink-hbase,\
+flink-connectors/flink-connector-hbase-base,\
+flink-connectors/flink-connector-hbase-1.4,\
+flink-connectors/flink-connector-hbase-2.2,\
 flink-connectors/flink-hcatalog,\
 flink-connectors/flink-hadoop-compatibility,\
-flink-connectors/flink-jdbc,\
 flink-connectors,\
+flink-connectors/flink-connector-jdbc,\
 flink-connectors/flink-connector-cassandra,\
 flink-connectors/flink-connector-elasticsearch5,\
 flink-connectors/flink-connector-elasticsearch6,\
@@ -95,12 +98,6 @@ flink-connectors/flink-connector-elasticsearch7,\
 flink-connectors/flink-sql-connector-elasticsearch6,\
 flink-connectors/flink-sql-connector-elasticsearch7,\
 flink-connectors/flink-connector-elasticsearch-base,\
-flink-connectors/flink-connector-filesystem,\
-flink-connectors/flink-connector-kafka-0.10,\
-flink-connectors/flink-sql-connector-kafka-0.10,\
-flink-connectors/flink-connector-kafka-0.11,\
-flink-connectors/flink-sql-connector-kafka-0.11,\
-flink-connectors/flink-connector-kafka-base,\
 flink-connectors/flink-connector-nifi,\
 flink-connectors/flink-connector-rabbitmq,\
 flink-connectors/flink-connector-twitter,\
@@ -125,6 +122,10 @@ flink-connectors/flink-sql-connector-kafka,"
 
 MODULES_TESTS="\
 flink-tests"
+
+MODULES_LEGACY_SLOT_MANAGEMENT=${MODULES_CORE},${MODULES_TESTS}
+
+MODULES_FINEGRAINED_RESOURCE_MANAGEMENT=${MODULES_CORE},${MODULES_TESTS}
 
 # we can only build the Scala Shell when building for Scala 2.11
 if [[ $PROFILE == *"scala-2.11"* ]]; then
@@ -153,16 +154,17 @@ function get_compile_modules_for_stage() {
         (${STAGE_TESTS})
             echo "-pl $MODULES_TESTS -am"
         ;;
-        (${STAGE_LEGACY_SCHEDULER_CORE})
-            echo "-pl $MODULES_CORE -am"
-        ;;
-        (${STAGE_LEGACY_SCHEDULER_TESTS})
-            echo "-pl $MODULES_TESTS -am"
-        ;;
         (${STAGE_MISC})
             # compile everything; using the -am switch does not work with negated module lists!
             # the negation takes precedence, thus not all required modules would be built
             echo ""
+        ;;
+        (${STAGE_PYTHON})
+            # compile everything for PyFlink.
+            echo ""
+        ;;
+        (${STAGE_FINEGRAINED_RESOURCE_MANAGEMENT})
+            echo "-pl $MODULES_FINEGRAINED_RESOURCE_MANAGEMENT -am"
         ;;
     esac
 }
@@ -182,6 +184,7 @@ function get_test_modules_for_stage() {
     local negated_connectors=\!${MODULES_CONNECTORS//,/,\!}
     local negated_tests=\!${MODULES_TESTS//,/,\!}
     local modules_misc="$negated_core,$negated_libraries,$negated_blink_planner,$negated_connectors,$negated_kafka_gelly,$negated_tests"
+    local modules_finegrained_resource_management=$MODULES_FINEGRAINED_RESOURCE_MANAGEMENT
 
     case ${stage} in
         (${STAGE_CORE})
@@ -202,14 +205,11 @@ function get_test_modules_for_stage() {
         (${STAGE_TESTS})
             echo "-pl $modules_tests"
         ;;
-        (${STAGE_LEGACY_SCHEDULER_CORE})
-            echo "-Dlegacy-scheduler -pl $MODULES_CORE"
-        ;;
-        (${STAGE_LEGACY_SCHEDULER_TESTS})
-            echo "-Dlegacy-scheduler -pl $MODULES_TESTS"
-        ;;
         (${STAGE_MISC})
             echo "-pl $modules_misc"
+        ;;
+        (${STAGE_FINEGRAINED_RESOURCE_MANAGEMENT})
+            echo "-pl $modules_finegrained_resource_management"
         ;;
     esac
 }

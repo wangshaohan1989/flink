@@ -24,11 +24,11 @@ under the License.
 	<parent>
 		<artifactId>flink-table</artifactId>
 		<groupId>org.apache.flink</groupId>
-		<version>1.11-SNAPSHOT</version>
+		<version>1.14-SNAPSHOT</version>
 	</parent>
 
 	<artifactId>flink-sql-parser-hive</artifactId>
-	<name>flink-sql-parser-hive</name>
+	<name>Flink : Table : SQL Parser Hive</name>
 
 	<packaging>jar</packaging>
 
@@ -78,6 +78,10 @@ under the License.
 					<groupId>com.fasterxml.jackson.core</groupId>
 					<artifactId>jackson-annotations</artifactId>
 				</exclusion>
+				<exclusion>
+					<groupId>com.google.uzaygezen</groupId>
+					<artifactId>uzaygezen-core</artifactId>
+				</exclusion>
 			</exclusions>
 			<scope>test</scope>
 			<type>test-jar</type>
@@ -87,7 +91,7 @@ under the License.
 		<dependency>
 			<groupId>org.junit.jupiter</groupId>
 			<artifactId>junit-jupiter-engine</artifactId>
-			<version>5.5.2</version>
+			<version>5.7.2</version>
 			<scope>test</scope>
 		</dependency>
 		<!-- As we switched to JUnit5 runner to use the Calcite tests infrastructure we need
@@ -96,7 +100,7 @@ under the License.
 		<dependency>
 			<groupId>org.junit.vintage</groupId>
 			<artifactId>junit-vintage-engine</artifactId>
-			<version>5.5.2</version>
+			<version>5.7.2</version>
 			<scope>test</scope>
 		</dependency>
 	</dependencies>

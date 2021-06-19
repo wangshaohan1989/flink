@@ -27,14 +27,14 @@ import org.apache.flink.runtime.state.memory.MemoryStateBackend
 import org.apache.flink.streaming.api.CheckpointingMode
 import org.apache.flink.streaming.api.functions.source.FromElementsFunction
 import org.apache.flink.streaming.api.scala.DataStream
-import org.apache.flink.table.api.scala.StreamTableEnvironment
+import org.apache.flink.table.api.bridge.scala.StreamTableEnvironment
 import org.apache.flink.table.data.binary.BinaryRowData
 import org.apache.flink.table.data.writer.BinaryRowWriter
 import org.apache.flink.table.data.{RowData, StringData}
 import org.apache.flink.table.planner.runtime.utils.StreamingWithStateTestBase.{HEAP_BACKEND, ROCKSDB_BACKEND, StateBackendMode}
 import org.apache.flink.table.planner.utils.TableTestUtil
 import org.apache.flink.table.runtime.types.TypeInfoLogicalTypeConverter
-import org.apache.flink.table.runtime.typeutils.RowDataTypeInfo
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo
 import org.apache.flink.table.types.logical.RowType
 
 import org.junit.runners.Parameterized
@@ -66,7 +66,6 @@ class StreamingWithStateTestBase(state: StateBackendMode) extends StreamingTestB
     state match {
       case HEAP_BACKEND =>
         val conf = new Configuration()
-        conf.setBoolean(CheckpointingOptions.ASYNC_SNAPSHOTS, true)
         env.setStateBackend(new MemoryStateBackend(
           "file://" + baseCheckpointPath, null).configure(conf, classLoader))
       case ROCKSDB_BACKEND =>
@@ -80,7 +79,8 @@ class StreamingWithStateTestBase(state: StateBackendMode) extends StreamingTestB
   }
 
   @After
-  def after(): Unit = {
+  override def after(): Unit = {
+    super.after()
     Assert.assertTrue(FailingCollectionSource.failedBefore)
   }
 
@@ -108,7 +108,7 @@ class StreamingWithStateTestBase(state: StateBackendMode) extends StreamingTestB
         result += reuse.copy()
       case _ => throw new UnsupportedOperationException
     }
-    val newTypeInfo = RowDataTypeInfo.of(
+    val newTypeInfo = InternalTypeInfo.of(
       TypeInfoLogicalTypeConverter.fromTypeInfoToLogicalType(typeInfo).asInstanceOf[RowType])
     failingDataSource(result)(newTypeInfo.asInstanceOf[TypeInformation[RowData]])
   }

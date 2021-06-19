@@ -25,13 +25,12 @@ import org.apache.flink.table.api._
 import org.apache.flink.table.catalog.{CatalogTable, ObjectIdentifier}
 import org.apache.flink.table.data.RowData
 import org.apache.flink.table.operations.CatalogSinkModifyOperation
-import org.apache.flink.table.planner.calcite.FlinkTypeFactory
+import org.apache.flink.table.planner.connectors.DynamicSinkUtils
 import org.apache.flink.table.runtime.types.TypeInfoDataTypeConverter.fromDataTypeToTypeInfo
-import org.apache.flink.table.runtime.typeutils.RowDataTypeInfo
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo
 import org.apache.flink.table.sinks._
 import org.apache.flink.table.types.DataType
-import org.apache.flink.table.types.inference.TypeTransformations.{legacyDecimalToDefaultDecimal, legacyRawToTypeInfoRaw, toNullable}
-import org.apache.flink.table.types.logical.utils.LogicalTypeCasts.{supportsAvoidingCast, supportsImplicitCast}
+import org.apache.flink.table.types.inference.TypeTransformations.toNullable
 import org.apache.flink.table.types.logical.utils.LogicalTypeChecks
 import org.apache.flink.table.types.logical.{LegacyTypeInformationType, RowType}
 import org.apache.flink.table.types.utils.DataTypeUtils
@@ -39,65 +38,12 @@ import org.apache.flink.table.types.utils.TypeConversions.{fromLegacyInfoToDataT
 import org.apache.flink.table.utils.{TableSchemaUtils, TypeMappingUtils}
 import org.apache.flink.types.Row
 
-import org.apache.calcite.plan.RelOptUtil
-import org.apache.calcite.rel.RelNode
-
 import _root_.scala.collection.JavaConversions._
 
+/**
+ * Note: We aim to gradually port the logic in this class to [[DynamicSinkUtils]].
+ */
 object TableSinkUtils {
-
-  /**
-    * Checks if the given query can be written into the given sink. It checks the field types
-    * should be compatible (types should equal including precisions). If types are not compatible,
-    * but can be implicitly casted, a cast projection will be applied. Otherwise, an exception will
-    * be thrown.
-    *
-    * @param query the query to be checked
-    * @param sinkSchema the schema of sink to be checked
-    * @param typeFactory type factory
-    * @return the query RelNode which may be applied the implicitly cast projection.
-    */
-  def validateSchemaAndApplyImplicitCast(
-      query: RelNode,
-      sinkSchema: TableSchema,
-      typeFactory: FlinkTypeFactory,
-      sinkIdentifier: Option[String] = None): RelNode = {
-
-    val queryLogicalType = FlinkTypeFactory.toLogicalRowType(query.getRowType)
-    val sinkLogicalType = DataTypeUtils
-      // we recognize legacy decimal is the same to default decimal
-      .transform(sinkSchema.toRowDataType, legacyDecimalToDefaultDecimal, legacyRawToTypeInfoRaw)
-      .getLogicalType
-      .asInstanceOf[RowType]
-    if (supportsImplicitCast(queryLogicalType, sinkLogicalType)) {
-      // the query can be written into sink
-      // but we may need to add a cast project if the types are not compatible
-      if (supportsAvoidingCast(queryLogicalType, sinkLogicalType)) {
-        query
-      } else {
-        // otherwise, add a cast project
-        val castedDataType = typeFactory.buildRelNodeRowType(
-          sinkLogicalType.getFieldNames,
-          sinkLogicalType.getFields.map(_.getType))
-        RelOptUtil.createCastRel(query, castedDataType, true)
-      }
-    } else {
-      // format query and sink schema strings
-      val srcSchema = queryLogicalType.getFields
-        .map(f => s"${f.getName}: ${f.getType.asSerializableString()}")
-        .mkString("[", ", ", "]")
-      val sinkSchema = sinkLogicalType.getFields
-        .map(f => s"${f.getName}: ${f.getType.asSerializableString()}")
-        .mkString("[", ", ", "]")
-
-      val sinkDesc: String = sinkIdentifier.getOrElse("")
-
-      throw new ValidationException(
-        s"Field types of query result and registered TableSink $sinkDesc do not match.\n" +
-          s"Query schema: $srcSchema\n" +
-          s"Sink schema: $sinkSchema")
-    }
-  }
 
   /**
     * It checks whether the [[TableSink]] is compatible to the INSERT INTO clause, e.g.
@@ -185,7 +131,9 @@ object TableSinkUtils {
       // and infer the sink schema via field names, see expandPojoTypeToSchema().
       fromDataTypeToTypeInfo(requestedOutputType) match {
         case pj: PojoTypeInfo[_] => expandPojoTypeToSchema(pj, queryLogicalType)
-        case _ => DataTypeUtils.expandCompositeTypeToSchema(requestedOutputType)
+        case _ =>
+          TableSchema.fromResolvedSchema(
+            DataTypeUtils.expandCompositeTypeToSchema(requestedOutputType))
       }
     } else {
       // atomic type
@@ -219,7 +167,8 @@ object TableSinkUtils {
       }
       DataTypes.FIELD(name, fieldDataType)
     })
-    DataTypeUtils.expandCompositeTypeToSchema(DataTypes.ROW(reorderedFields: _*))
+    TableSchema.fromResolvedSchema(
+      DataTypeUtils.expandCompositeTypeToSchema(DataTypes.ROW(reorderedFields: _*)))
   }
 
   /**
@@ -269,8 +218,8 @@ object TableSinkUtils {
         fromLogicalToDataType(queryLogicalType).bridgedTo(classOf[Row])
       case gt: GenericTypeInfo[RowData] if gt.getTypeClass == classOf[RowData] =>
         fromLogicalToDataType(queryLogicalType).bridgedTo(classOf[RowData])
-      case bt: RowDataTypeInfo =>
-        val fields = bt.getFieldNames.zip(bt.getLogicalTypes).map { case (n, t) =>
+      case bt: InternalTypeInfo[RowData] =>
+        val fields = bt.toRowFieldNames.zip(bt.toRowFieldTypes).map { case (n, t) =>
           DataTypes.FIELD(n, fromLogicalToDataType(t))
         }
         DataTypes.ROW(fields: _*).bridgedTo(classOf[RowData])

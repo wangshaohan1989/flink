@@ -22,101 +22,133 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.client.deployment.application.ApplicationClusterEntryPoint;
 import org.apache.flink.client.deployment.application.ApplicationConfiguration;
 import org.apache.flink.client.deployment.application.ClassPathPackagedProgramRetriever;
-import org.apache.flink.client.deployment.application.executors.EmbeddedExecutor;
 import org.apache.flink.client.program.PackagedProgram;
 import org.apache.flink.client.program.PackagedProgramRetriever;
-import org.apache.flink.configuration.ConfigUtils;
 import org.apache.flink.configuration.Configuration;
-import org.apache.flink.configuration.DeploymentOptions;
 import org.apache.flink.configuration.PipelineOptions;
 import org.apache.flink.runtime.entrypoint.ClusterEntrypoint;
+import org.apache.flink.runtime.entrypoint.ClusterEntrypointUtils;
+import org.apache.flink.runtime.entrypoint.DynamicParametersConfigurationParserFactory;
 import org.apache.flink.runtime.util.EnvironmentInformation;
 import org.apache.flink.runtime.util.JvmShutdownSafeguard;
 import org.apache.flink.runtime.util.SignalHandler;
 import org.apache.flink.util.FlinkException;
 import org.apache.flink.util.Preconditions;
+import org.apache.flink.yarn.configuration.YarnConfigOptions;
 
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.api.ApplicationConstants;
 
 import javax.annotation.Nullable;
 
+import java.io.File;
 import java.io.IOException;
-import java.net.URL;
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
-/**
- * An {@link ApplicationClusterEntryPoint} for Yarn.
- */
+/** An {@link ApplicationClusterEntryPoint} for Yarn. */
 @Internal
 public final class YarnApplicationClusterEntryPoint extends ApplicationClusterEntryPoint {
 
-	private YarnApplicationClusterEntryPoint(
-			final Configuration configuration,
-			final PackagedProgram program) {
-		super(configuration, program, YarnResourceManagerFactory.getInstance());
-	}
+    private YarnApplicationClusterEntryPoint(
+            final Configuration configuration, final PackagedProgram program) {
+        super(configuration, program, YarnResourceManagerFactory.getInstance());
+    }
 
-	public static void main(final String[] args) {
-		// startup checks and logging
-		EnvironmentInformation.logEnvironmentInfo(LOG, YarnApplicationClusterEntryPoint.class.getSimpleName(), args);
-		SignalHandler.register(LOG);
-		JvmShutdownSafeguard.installAsShutdownHook(LOG);
+    @Override
+    protected String getRPCPortRange(Configuration configuration) {
+        return configuration.getString(YarnConfigOptions.APPLICATION_MASTER_PORT);
+    }
 
-		Map<String, String> env = System.getenv();
+    public static void main(final String[] args) {
+        // startup checks and logging
+        EnvironmentInformation.logEnvironmentInfo(
+                LOG, YarnApplicationClusterEntryPoint.class.getSimpleName(), args);
+        SignalHandler.register(LOG);
+        JvmShutdownSafeguard.installAsShutdownHook(LOG);
 
-		final String workingDirectory = env.get(ApplicationConstants.Environment.PWD.key());
-		Preconditions.checkArgument(
-				workingDirectory != null,
-				"Working directory variable (%s) not set",
-				ApplicationConstants.Environment.PWD.key());
+        Map<String, String> env = System.getenv();
 
-		try {
-			YarnEntrypointUtils.logYarnEnvironmentInformation(env, LOG);
-		} catch (IOException e) {
-			LOG.warn("Could not log YARN environment information.", e);
-		}
+        final String workingDirectory = env.get(ApplicationConstants.Environment.PWD.key());
+        Preconditions.checkArgument(
+                workingDirectory != null,
+                "Working directory variable (%s) not set",
+                ApplicationConstants.Environment.PWD.key());
 
-		final Configuration configuration = YarnEntrypointUtils.loadConfiguration(workingDirectory, env);
+        try {
+            YarnEntrypointUtils.logYarnEnvironmentInformation(env, LOG);
+        } catch (IOException e) {
+            LOG.warn("Could not log YARN environment information.", e);
+        }
 
-		PackagedProgram program = null;
-		try {
-			program = getPackagedProgram(configuration);
-		} catch (Exception e) {
-			LOG.error("Could not create application program.", e);
-			System.exit(1);
-		}
+        final Configuration dynamicParameters =
+                ClusterEntrypointUtils.parseParametersOrExit(
+                        args,
+                        new DynamicParametersConfigurationParserFactory(),
+                        YarnApplicationClusterEntryPoint.class);
+        final Configuration configuration =
+                YarnEntrypointUtils.loadConfiguration(workingDirectory, dynamicParameters, env);
 
-		configuration.set(DeploymentOptions.TARGET, EmbeddedExecutor.NAME);
-		ConfigUtils.encodeCollectionToConfig(configuration, PipelineOptions.JARS, program.getJobJarAndDependencies(), URL::toString);
-		ConfigUtils.encodeCollectionToConfig(configuration, PipelineOptions.CLASSPATHS, program.getClasspaths(), URL::toString);
+        PackagedProgram program = null;
+        try {
+            program = getPackagedProgram(configuration);
+        } catch (Exception e) {
+            LOG.error("Could not create application program.", e);
+            System.exit(1);
+        }
 
-		YarnApplicationClusterEntryPoint yarnApplicationClusterEntrypoint =
-				new YarnApplicationClusterEntryPoint(configuration, program);
+        try {
+            configureExecution(configuration, program);
+        } catch (Exception e) {
+            LOG.error("Could not apply application configuration.", e);
+            System.exit(1);
+        }
 
-		ClusterEntrypoint.runClusterEntrypoint(yarnApplicationClusterEntrypoint);
-	}
+        YarnApplicationClusterEntryPoint yarnApplicationClusterEntrypoint =
+                new YarnApplicationClusterEntryPoint(configuration, program);
 
-	private static PackagedProgram getPackagedProgram(final Configuration configuration) throws IOException, FlinkException {
+        ClusterEntrypoint.runClusterEntrypoint(yarnApplicationClusterEntrypoint);
+    }
 
-		final ApplicationConfiguration applicationConfiguration =
-				ApplicationConfiguration.fromConfiguration(configuration);
+    private static PackagedProgram getPackagedProgram(final Configuration configuration)
+            throws IOException, FlinkException {
 
-		final PackagedProgramRetriever programRetriever = getPackagedProgramRetriever(
-				configuration,
-				applicationConfiguration.getProgramArguments(),
-				applicationConfiguration.getApplicationClassName());
-		return programRetriever.getPackagedProgram();
-	}
+        final ApplicationConfiguration applicationConfiguration =
+                ApplicationConfiguration.fromConfiguration(configuration);
 
-	private static PackagedProgramRetriever getPackagedProgramRetriever(
-			final Configuration configuration,
-			final String[] programArguments,
-			@Nullable final String jobClassName) throws IOException {
-		final ClassPathPackagedProgramRetriever.Builder retrieverBuilder =
-				ClassPathPackagedProgramRetriever
-						.newBuilder(programArguments)
-						.setJobClassName(jobClassName);
-		YarnEntrypointUtils.getUsrLibDir(configuration).ifPresent(retrieverBuilder::setUserLibDirectory);
-		return retrieverBuilder.build();
-	}
+        final PackagedProgramRetriever programRetriever =
+                getPackagedProgramRetriever(
+                        configuration,
+                        applicationConfiguration.getProgramArguments(),
+                        applicationConfiguration.getApplicationClassName());
+        return programRetriever.getPackagedProgram();
+    }
+
+    private static PackagedProgramRetriever getPackagedProgramRetriever(
+            final Configuration configuration,
+            final String[] programArguments,
+            @Nullable final String jobClassName)
+            throws IOException {
+
+        final File userLibDir = YarnEntrypointUtils.getUsrLibDir(configuration).orElse(null);
+        final File userApplicationJar = getUserApplicationJar(userLibDir, configuration);
+        final ClassPathPackagedProgramRetriever.Builder retrieverBuilder =
+                ClassPathPackagedProgramRetriever.newBuilder(programArguments)
+                        .setUserLibDirectory(userLibDir)
+                        .setJarFile(userApplicationJar)
+                        .setJobClassName(jobClassName);
+        return retrieverBuilder.build();
+    }
+
+    private static File getUserApplicationJar(
+            final File userLibDir, final Configuration configuration) {
+        final List<File> pipelineJars =
+                configuration.get(PipelineOptions.JARS).stream()
+                        .map(uri -> new File(userLibDir, new Path(uri).getName()))
+                        .collect(Collectors.toList());
+
+        Preconditions.checkArgument(pipelineJars.size() == 1, "Should only have one jar");
+        return pipelineJars.get(0);
+    }
 }

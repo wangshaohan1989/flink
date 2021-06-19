@@ -23,25 +23,24 @@ import org.apache.flink.configuration.ConfigOptions.key
 import org.apache.flink.table.api.{TableConfig, TableException}
 import org.apache.flink.table.planner.plan.logical.{LogicalWindow, SessionGroupWindow}
 import org.apache.flink.table.planner.plan.utils.AggregateUtil.isRowtimeAttribute
-import org.apache.flink.table.planner.utils.TableConfigUtils.getMillisecondFromConfigDuration
+import org.apache.flink.table.planner.{JBoolean, JLong}
 import org.apache.flink.table.runtime.operators.window.TimeWindow
 import org.apache.flink.table.runtime.operators.window.triggers._
 
-import java.lang.{Boolean, Long}
 import java.time.Duration
 
 class WindowEmitStrategy(
-    isEventTime: Boolean,
-    isSessionWindow: Boolean,
-    earlyFireDelay: Long,
-    earlyFireDelayEnabled: Boolean,
-    lateFireDelay: Long,
-    lateFireDelayEnabled: Boolean,
-    allowLateness: Long) {
+    isEventTime: JBoolean,
+    isSessionWindow: JBoolean,
+    earlyFireDelay: Duration,
+    earlyFireDelayEnabled: JBoolean,
+    lateFireDelay: Duration,
+    lateFireDelayEnabled: JBoolean,
+    allowLateness: JLong) {
 
   checkValidation()
 
-  def getAllowLateness: Long = allowLateness
+  def getAllowLateness: JLong = allowLateness
 
   private def checkValidation(): Unit = {
     if (isSessionWindow && (earlyFireDelayEnabled || lateFireDelayEnabled)) {
@@ -49,19 +48,23 @@ class WindowEmitStrategy(
     }
     if (isEventTime && lateFireDelayEnabled && allowLateness <= 0L) {
       throw new TableException("The 'AFTER WATERMARK' emit strategy requires set " +
-        "'minIdleStateRetentionTime' in table config.")
+        "'allow-lateness' or 'minIdleStateRetentionTime' in table config.")
     }
-    if (earlyFireDelayEnabled && (earlyFireDelay == null || earlyFireDelay < 0)) {
+    if (earlyFireDelayEnabled && (earlyFireDelay == null || earlyFireDelay.toMillis < 0)) {
       throw new TableException("Early-fire delay should not be null or negative value when" +
         "enable early-fire emit strategy.")
     }
-    if (lateFireDelayEnabled && (lateFireDelay == null || lateFireDelay < 0)) {
+    if (lateFireDelayEnabled && (lateFireDelay == null || lateFireDelay.toMillis < 0)) {
       throw new TableException("Late-fire delay should not be null or negative value when" +
         "enable late-fire emit strategy.")
     }
+    if (lateFireDelayEnabled && (lateFireDelay.toMillis > allowLateness)) {
+      throw new TableException(s"Allow-lateness [${allowLateness}ms] should not be smaller than " +
+        s"Late-fire delay [${lateFireDelay.toMillis}ms] when enable late-fire emit strategy.")
+    }
   }
 
-  def produceUpdates: Boolean = {
+  def produceUpdates: JBoolean = {
     if (isEventTime) {
       earlyFireDelayEnabled || lateFireDelayEnabled
     } else {
@@ -70,8 +73,8 @@ class WindowEmitStrategy(
   }
 
   def getTrigger: Trigger[TimeWindow] = {
-    val earlyTrigger = createTriggerFromInterval(earlyFireDelayEnabled, earlyFireDelay)
-    val lateTrigger = createTriggerFromInterval(lateFireDelayEnabled, lateFireDelay)
+    val earlyTrigger = createTriggerFromFireDelay(earlyFireDelayEnabled, earlyFireDelay)
+    val lateTrigger = createTriggerFromFireDelay(lateFireDelayEnabled, lateFireDelay)
 
     if (isEventTime) {
       val trigger = EventTimeTriggers.afterEndOfWindow[TimeWindow]()
@@ -95,8 +98,8 @@ class WindowEmitStrategy(
 
   override def toString: String = {
     val builder = new StringBuilder
-    val earlyString = intervalToString(earlyFireDelayEnabled, earlyFireDelay)
-    val lateString = intervalToString(lateFireDelayEnabled, lateFireDelay)
+    val earlyString = fireDelayToString(earlyFireDelayEnabled, earlyFireDelay)
+    val lateString = fireDelayToString(lateFireDelayEnabled, lateFireDelay)
     if (earlyString != null) {
       builder.append("early ").append(earlyString)
     }
@@ -109,26 +112,26 @@ class WindowEmitStrategy(
     builder.toString
   }
 
-  private def createTriggerFromInterval(
-      enableDelayEmit: Boolean,
-      interval: Long): Option[Trigger[TimeWindow]] = {
+  private def createTriggerFromFireDelay(
+      enableDelayEmit: JBoolean,
+      fireDelay: Duration): Option[Trigger[TimeWindow]] = {
     if (!enableDelayEmit) {
       None
     } else {
-      if (interval > 0) {
-        Some(ProcessingTimeTriggers.every(Duration.ofMillis(interval)))
+      if (fireDelay.toMillis > 0) {
+        Some(ProcessingTimeTriggers.every(fireDelay))
       } else {
         Some(ElementTriggers.every())
       }
     }
   }
 
-  private def intervalToString(enableDelayEmit: Boolean, interval: Long): String = {
+  private def fireDelayToString(enableDelayEmit: JBoolean, fireDelay: Duration): String = {
     if (!enableDelayEmit) {
       null
     } else {
-      if (interval > 0) {
-        s"delay $interval millisecond"
+      if (fireDelay.toMillis > 0) {
+        s"delay ${fireDelay.toMillis} millisecond"
       } else {
         "no delay"
       }
@@ -141,25 +144,18 @@ object WindowEmitStrategy {
     val isEventTime = isRowtimeAttribute(window.timeAttribute)
     val isSessionWindow = window.isInstanceOf[SessionGroupWindow]
 
-    val allowLateness = if (isSessionWindow) {
-      // ignore allow lateness in session window because retraction is not supported
-      0L
-    } else if (tableConfig.getMinIdleStateRetentionTime < 0) {
-      // min idle state retention time is not set, use 0L as default which means not allow lateness
-      0L
-    } else {
-      // use min idle state retention time as allow lateness
-      tableConfig.getMinIdleStateRetentionTime
-    }
+    val allowLateness = parseAllowLateness(isSessionWindow, tableConfig)
     val enableEarlyFireDelay = tableConfig.getConfiguration.getBoolean(
       TABLE_EXEC_EMIT_EARLY_FIRE_ENABLED)
-    val earlyFireDelay = getMillisecondFromConfigDuration(
-      tableConfig, TABLE_EXEC_EMIT_EARLY_FIRE_DELAY)
+    val earlyFireDelay: Duration = tableConfig.getConfiguration
+      .getOptional(TABLE_EXEC_EMIT_EARLY_FIRE_DELAY)
+      .orElse(null)
     val enableLateFireDelay = tableConfig.getConfiguration.getBoolean(
       TABLE_EXEC_EMIT_LATE_FIRE_ENABLED)
-    val lateFireDelay = getMillisecondFromConfigDuration(
-      tableConfig, TABLE_EXEC_EMIT_LATE_FIRE_DELAY)
-    new WindowEmitStrategy(
+    val lateFireDelay: Duration = tableConfig.getConfiguration
+      .getOptional(TABLE_EXEC_EMIT_LATE_FIRE_DELAY)
+      .orElse(null)
+      new WindowEmitStrategy(
       isEventTime,
       isSessionWindow,
       earlyFireDelay,
@@ -169,19 +165,46 @@ object WindowEmitStrategy {
       allowLateness)
   }
 
+  private def parseAllowLateness(
+      isSessionWindow: Boolean,
+      tableConfig: TableConfig): Long = {
+    val enableLateFireDelay = tableConfig.getConfiguration.getBoolean(
+      TABLE_EXEC_EMIT_LATE_FIRE_ENABLED)
+    val emitAllowLateness: Duration = tableConfig.getConfiguration
+      .getOptional(TABLE_EXEC_EMIT_ALLOW_LATENESS)
+      .orElse(null)
+    if (isSessionWindow) {
+      // ignore allow lateness in session window because retraction is not supported
+      0L
+    } else if (!enableLateFireDelay) {
+      // ignore allow lateness if disable late-fire delay
+      0L
+    } else if (emitAllowLateness != null) {
+      // return emit allow-lateness if it is set
+      emitAllowLateness.toMillis
+    } else if (tableConfig.getMinIdleStateRetentionTime < 0) {
+      // min idle state retention time is not set, use 0L as default which means not allow lateness
+      0L
+    } else {
+      // use min idle state retention time as allow lateness
+      tableConfig.getMinIdleStateRetentionTime
+    }
+  }
+
   // It is a experimental config, will may be removed later.
   @Experimental
-  val TABLE_EXEC_EMIT_EARLY_FIRE_ENABLED: ConfigOption[Boolean] =
+  val TABLE_EXEC_EMIT_EARLY_FIRE_ENABLED: ConfigOption[JBoolean] =
   key("table.exec.emit.early-fire.enabled")
-      .defaultValue(Boolean.valueOf(false))
+      .defaultValue(Boolean.box(false))
       .withDescription("Specifies whether to enable early-fire emit." +
           "Early-fire is an emit strategy before watermark advanced to end of window.")
 
   // It is a experimental config, will may be removed later.
   @Experimental
-  val TABLE_EXEC_EMIT_EARLY_FIRE_DELAY: ConfigOption[String] =
+  val TABLE_EXEC_EMIT_EARLY_FIRE_DELAY: ConfigOption[Duration] =
   key("table.exec.emit.early-fire.delay")
-      .noDefaultValue
+      .durationType()
+      .noDefaultValue()
       .withDescription("The early firing delay in milli second, early fire is " +
           "the emit strategy before watermark advanced to end of window. " +
           "< 0 is illegal configuration. " +
@@ -190,21 +213,35 @@ object WindowEmitStrategy {
 
   // It is a experimental config, will may be removed later.
   @Experimental
-  val TABLE_EXEC_EMIT_LATE_FIRE_ENABLED: ConfigOption[Boolean] =
+  val TABLE_EXEC_EMIT_LATE_FIRE_ENABLED: ConfigOption[JBoolean] =
   key("table.exec.emit.late-fire.enabled")
-      .defaultValue(Boolean.valueOf(false))
+      .defaultValue(Boolean.box(false))
       .withDescription("Specifies whether to enable late-fire emit. " +
           "Late-fire is an emit strategy after watermark advanced to end of window.")
 
   // It is a experimental config, will may be removed later.
   @Experimental
-  val TABLE_EXEC_EMIT_LATE_FIRE_DELAY: ConfigOption[String] =
+  val TABLE_EXEC_EMIT_LATE_FIRE_DELAY: ConfigOption[Duration] =
   key("table.exec.emit.late-fire.delay")
-      .noDefaultValue
+      .durationType()
+      .noDefaultValue()
       .withDescription("The late firing delay in milli second, late fire is " +
           "the emit strategy after watermark advanced to end of window. " +
           "< 0 is illegal configuration. " +
           "0 means no delay (fire on every element). " +
           "> 0 means the fire interval.")
 
+  // It is a experimental config, will may be removed later.
+  @Experimental
+  val TABLE_EXEC_EMIT_ALLOW_LATENESS: ConfigOption[Duration] =
+  key("table.exec.emit.allow-lateness")
+    .durationType()
+    .noDefaultValue()
+    .withDescription("Sets the time by which elements are allowed to be late. " +
+        "Elements that arrive behind the watermark by more than the specified time " +
+        "will be dropped. " +
+        "Note: use the value if it is set, else use 'minIdleStateRetentionTime' in table config." +
+        "< 0 is illegal configuration. " +
+        "0 means disable allow lateness. " +
+        "> 0 means allow-lateness.")
 }

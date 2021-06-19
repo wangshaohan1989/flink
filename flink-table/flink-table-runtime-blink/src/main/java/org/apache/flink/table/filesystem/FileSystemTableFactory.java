@@ -19,156 +19,187 @@
 package org.apache.flink.table.filesystem;
 
 import org.apache.flink.configuration.ConfigOption;
-import org.apache.flink.core.fs.Path;
-import org.apache.flink.table.data.RowData;
-import org.apache.flink.table.descriptors.DescriptorProperties;
+import org.apache.flink.configuration.Configuration;
+import org.apache.flink.table.api.ValidationException;
+import org.apache.flink.table.connector.format.DecodingFormat;
+import org.apache.flink.table.connector.format.EncodingFormat;
+import org.apache.flink.table.connector.sink.DynamicTableSink;
+import org.apache.flink.table.connector.source.DynamicTableSource;
+import org.apache.flink.table.factories.BulkReaderFormatFactory;
+import org.apache.flink.table.factories.BulkWriterFormatFactory;
+import org.apache.flink.table.factories.DecodingFormatFactory;
+import org.apache.flink.table.factories.DeserializationFormatFactory;
+import org.apache.flink.table.factories.DynamicTableSinkFactory;
+import org.apache.flink.table.factories.DynamicTableSourceFactory;
+import org.apache.flink.table.factories.EncodingFormatFactory;
+import org.apache.flink.table.factories.Factory;
+import org.apache.flink.table.factories.FactoryUtil;
 import org.apache.flink.table.factories.FileSystemFormatFactory;
+import org.apache.flink.table.factories.SerializationFormatFactory;
 import org.apache.flink.table.factories.TableFactory;
-import org.apache.flink.table.factories.TableFactoryService;
-import org.apache.flink.table.factories.TableSinkFactory;
-import org.apache.flink.table.factories.TableSourceFactory;
-import org.apache.flink.table.sinks.TableSink;
-import org.apache.flink.table.sources.TableSource;
 
-import java.util.ArrayList;
-import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
-import java.util.Map;
+import java.util.ServiceLoader;
+import java.util.Set;
+import java.util.stream.Collectors;
 
-import static org.apache.flink.configuration.ConfigOptions.key;
-import static org.apache.flink.table.descriptors.ConnectorDescriptorValidator.CONNECTOR;
-import static org.apache.flink.table.descriptors.FormatDescriptorValidator.FORMAT;
-import static org.apache.flink.table.descriptors.Schema.SCHEMA;
+import static java.time.ZoneId.SHORT_IDS;
 
 /**
  * File system {@link TableFactory}.
  *
- * <p>1.The partition information should be in the file system path, whether it's a temporary
- * table or a catalog table.
- * 2.Support insert into (append) and insert overwrite.
- * 3.Support static and dynamic partition inserting.
- *
- * <p>Migrate to new source/sink interface after FLIP-95 is ready.
+ * <p>1.The partition information should be in the file system path, whether it's a temporary table
+ * or a catalog table. 2.Support insert into (append) and insert overwrite. 3.Support static and
+ * dynamic partition inserting.
  */
-public class FileSystemTableFactory implements
-		TableSourceFactory<RowData>,
-		TableSinkFactory<RowData> {
+public class FileSystemTableFactory implements DynamicTableSourceFactory, DynamicTableSinkFactory {
 
-	public static final String CONNECTOR_VALUE = "filesystem";
+    public static final String IDENTIFIER = "filesystem";
 
-	/**
-	 * Not use "connector.path" because:
-	 * 1.Using "connector.path" will conflict with current batch csv source and batch csv sink.
-	 * 2.This is compatible with FLIP-122.
-	 */
-	public static final String PATH = "path";
+    @Override
+    public String factoryIdentifier() {
+        return IDENTIFIER;
+    }
 
-	/**
-	 * Move these properties to validator after FLINK-16904.
-	 */
-	public static final ConfigOption<String> PARTITION_DEFAULT_NAME = key("partition.default-name")
-			.stringType()
-			.defaultValue("__DEFAULT_PARTITION__")
-			.withDescription("The default partition name in case the dynamic partition" +
-					" column value is null/empty string");
+    @Override
+    public DynamicTableSource createDynamicTableSource(Context context) {
+        FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
+        validate(helper);
+        return new FileSystemTableSource(
+                context,
+                discoverDecodingFormat(context, BulkReaderFormatFactory.class),
+                discoverDecodingFormat(context, DeserializationFormatFactory.class),
+                discoverFormatFactory(context));
+    }
 
-	public static final ConfigOption<Long> SINK_ROLLING_POLICY_FILE_SIZE = key("sink.rolling-policy.file-size")
-			.longType()
-			.defaultValue(1024L * 1024L * 128L)
-			.withDescription("The maximum part file size before rolling (by default 128MB).");
+    @Override
+    public DynamicTableSink createDynamicTableSink(Context context) {
+        FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
+        validate(helper);
+        return new FileSystemTableSink(
+                context,
+                discoverDecodingFormat(context, BulkReaderFormatFactory.class),
+                discoverDecodingFormat(context, DeserializationFormatFactory.class),
+                discoverFormatFactory(context),
+                discoverEncodingFormat(context, BulkWriterFormatFactory.class),
+                discoverEncodingFormat(context, SerializationFormatFactory.class));
+    }
 
-	public static final ConfigOption<Long> SINK_ROLLING_POLICY_TIME_INTERVAL = key("sink.rolling-policy.time.interval")
-			.longType()
-			.defaultValue(30L * 60 * 1000L)
-			.withDescription("The maximum time duration a part file can stay open before rolling" +
-					" (by default 30 min to avoid to many small files).");
+    @Override
+    public Set<ConfigOption<?>> requiredOptions() {
+        Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(FileSystemOptions.PATH);
+        options.add(FactoryUtil.FORMAT);
+        return options;
+    }
 
-	public static final ConfigOption<Boolean> SINK_SHUFFLE_BY_PARTITION = key("sink.shuffle-by-partition.enable")
-			.booleanType()
-			.defaultValue(false)
-			.withDescription("The option to enable shuffle data by dynamic partition fields in sink" +
-					" phase, this can greatly reduce the number of file for filesystem sink but may" +
-					" lead data skew, the default value is disabled.");
+    @Override
+    public Set<ConfigOption<?>> optionalOptions() {
+        Set<ConfigOption<?>> options = new HashSet<>();
+        options.add(FileSystemOptions.PARTITION_DEFAULT_NAME);
+        options.add(FileSystemOptions.SINK_ROLLING_POLICY_FILE_SIZE);
+        options.add(FileSystemOptions.SINK_ROLLING_POLICY_ROLLOVER_INTERVAL);
+        options.add(FileSystemOptions.SINK_ROLLING_POLICY_CHECK_INTERVAL);
+        options.add(FileSystemOptions.SINK_SHUFFLE_BY_PARTITION);
+        options.add(FileSystemOptions.PARTITION_TIME_EXTRACTOR_KIND);
+        options.add(FileSystemOptions.PARTITION_TIME_EXTRACTOR_CLASS);
+        options.add(FileSystemOptions.PARTITION_TIME_EXTRACTOR_TIMESTAMP_PATTERN);
+        options.add(FileSystemOptions.SINK_PARTITION_COMMIT_TRIGGER);
+        options.add(FileSystemOptions.SINK_PARTITION_COMMIT_DELAY);
+        options.add(FileSystemOptions.SINK_PARTITION_COMMIT_WATERMARK_TIME_ZONE);
+        options.add(FileSystemOptions.SINK_PARTITION_COMMIT_POLICY_KIND);
+        options.add(FileSystemOptions.SINK_PARTITION_COMMIT_POLICY_CLASS);
+        options.add(FileSystemOptions.SINK_PARTITION_COMMIT_SUCCESS_FILE_NAME);
+        options.add(FileSystemOptions.AUTO_COMPACTION);
+        options.add(FileSystemOptions.COMPACTION_FILE_SIZE);
+        options.add(FileSystemOptions.SINK_PARALLELISM);
+        return options;
+    }
 
-	@Override
-	public Map<String, String> requiredContext() {
-		Map<String, String> context = new HashMap<>();
-		context.put(CONNECTOR, CONNECTOR_VALUE);
-		return context;
-	}
+    private void validate(FactoryUtil.TableFactoryHelper helper) {
+        // Except format options, some formats like parquet and orc can not list all supported
+        // options.
+        helper.validateExcept(helper.getOptions().get(FactoryUtil.FORMAT) + ".");
 
-	@Override
-	public List<String> supportedProperties() {
-		List<String> properties = new ArrayList<>();
+        // validate time zone of watermark
+        String watermarkTimeZone =
+                helper.getOptions()
+                        .get(FileSystemOptions.SINK_PARTITION_COMMIT_WATERMARK_TIME_ZONE);
+        if (watermarkTimeZone.startsWith("UTC+")
+                || watermarkTimeZone.startsWith("UTC-")
+                || SHORT_IDS.containsKey(watermarkTimeZone)) {
+            throw new ValidationException(
+                    String.format(
+                            "The supported watermark time zone is either a full name such as 'America/Los_Angeles',"
+                                    + " or a custom time zone id such as 'GMT-08:00', but configured time zone is '%s'.",
+                            watermarkTimeZone));
+        }
+    }
 
-		// path
-		properties.add(PATH);
+    private <I, F extends DecodingFormatFactory<I>> DecodingFormat<I> discoverDecodingFormat(
+            Context context, Class<F> formatFactoryClass) {
+        FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
+        if (formatFactoryExists(context, formatFactoryClass)) {
+            return helper.discoverDecodingFormat(formatFactoryClass, FactoryUtil.FORMAT);
+        } else {
+            return null;
+        }
+    }
 
-		// schema
-		properties.add(SCHEMA + ".#." + DescriptorProperties.TABLE_SCHEMA_DATA_TYPE);
-		properties.add(SCHEMA + ".#." + DescriptorProperties.TABLE_SCHEMA_NAME);
+    private <I, F extends EncodingFormatFactory<I>> EncodingFormat<I> discoverEncodingFormat(
+            Context context, Class<F> formatFactoryClass) {
+        FactoryUtil.TableFactoryHelper helper = FactoryUtil.createTableFactoryHelper(this, context);
+        if (formatFactoryExists(context, formatFactoryClass)) {
+            return helper.discoverEncodingFormat(formatFactoryClass, FactoryUtil.FORMAT);
+        } else {
+            return null;
+        }
+    }
 
-		// partition
-		properties.add(DescriptorProperties.PARTITION_KEYS + ".#." +
-				DescriptorProperties.PARTITION_KEYS_NAME);
-		properties.add(PARTITION_DEFAULT_NAME.key());
+    private FileSystemFormatFactory discoverFormatFactory(Context context) {
+        if (formatFactoryExists(context, FileSystemFormatFactory.class)) {
+            Configuration options = Configuration.fromMap(context.getCatalogTable().getOptions());
+            String identifier = options.get(FactoryUtil.FORMAT);
+            return FactoryUtil.discoverFactory(
+                    Thread.currentThread().getContextClassLoader(),
+                    FileSystemFormatFactory.class,
+                    identifier);
+        } else {
+            return null;
+        }
+    }
 
-		properties.add(SINK_ROLLING_POLICY_FILE_SIZE.key());
-		properties.add(SINK_ROLLING_POLICY_TIME_INTERVAL.key());
-		properties.add(SINK_SHUFFLE_BY_PARTITION.key());
+    /**
+     * Returns true if the format factory can be found using the given factory base class and
+     * identifier.
+     */
+    private boolean formatFactoryExists(Context context, Class<?> factoryClass) {
+        Configuration options = Configuration.fromMap(context.getCatalogTable().getOptions());
+        String identifier = options.get(FactoryUtil.FORMAT);
+        if (identifier == null) {
+            throw new ValidationException(
+                    String.format(
+                            "Table options do not contain an option key '%s' for discovering a format.",
+                            FactoryUtil.FORMAT.key()));
+        }
 
-		// format
-		properties.add(FORMAT);
-		properties.add(FORMAT + ".*");
+        final List<Factory> factories = new LinkedList<>();
+        ServiceLoader.load(Factory.class, context.getClassLoader())
+                .iterator()
+                .forEachRemaining(factories::add);
 
-		return properties;
-	}
+        final List<Factory> foundFactories =
+                factories.stream()
+                        .filter(f -> factoryClass.isAssignableFrom(f.getClass()))
+                        .collect(Collectors.toList());
 
-	@Override
-	public TableSource<RowData> createTableSource(TableSourceFactory.Context context) {
-		DescriptorProperties properties = new DescriptorProperties();
-		properties.putProperties(context.getTable().getProperties());
+        final List<Factory> matchingFactories =
+                foundFactories.stream()
+                        .filter(f -> f.factoryIdentifier().equals(identifier))
+                        .collect(Collectors.toList());
 
-		return new FileSystemTableSource(
-				context.getTable().getSchema(),
-				new Path(properties.getString(PATH)),
-				context.getTable().getPartitionKeys(),
-				getPartitionDefaultName(properties),
-				getFormatProperties(context.getTable().getProperties()));
-	}
-
-	@Override
-	public TableSink<RowData> createTableSink(TableSinkFactory.Context context) {
-		DescriptorProperties properties = new DescriptorProperties();
-		properties.putProperties(context.getTable().getProperties());
-
-		return new FileSystemTableSink(
-				context.isBounded(),
-				context.getTable().getSchema(),
-				new Path(properties.getString(PATH)),
-				context.getTable().getPartitionKeys(),
-				getPartitionDefaultName(properties),
-				properties.getOptionalLong(SINK_ROLLING_POLICY_FILE_SIZE.key())
-						.orElse(SINK_ROLLING_POLICY_FILE_SIZE.defaultValue()),
-				properties.getOptionalLong(SINK_ROLLING_POLICY_TIME_INTERVAL.key())
-						.orElse(SINK_ROLLING_POLICY_TIME_INTERVAL.defaultValue()),
-				getFormatProperties(context.getTable().getProperties()));
-	}
-
-	private static Map<String, String> getFormatProperties(Map<String, String> tableProperties) {
-		return tableProperties;
-	}
-
-	private static String getPartitionDefaultName(DescriptorProperties properties) {
-		return properties
-				.getOptionalString(PARTITION_DEFAULT_NAME.key())
-				.orElse(PARTITION_DEFAULT_NAME.defaultValue());
-	}
-
-	public static FileSystemFormatFactory createFormatFactory(Map<String, String> properties) {
-		return TableFactoryService.find(
-				FileSystemFormatFactory.class,
-				properties,
-				FileSystemTableFactory.class.getClassLoader());
-	}
+        return !matchingFactories.isEmpty();
+    }
 }

@@ -19,29 +19,15 @@
 package org.apache.flink.table.planner.runtime.stream.sql
 
 import org.apache.flink.table.planner.runtime.stream.FsStreamingSinkITCaseBase
-import org.apache.flink.table.planner.utils.TestCsvFileSystemFormatFactory.USE_BULK_WRITER
-
-import org.junit.runner.RunWith
-import org.junit.runners.Parameterized
 
 import scala.collection.Seq
 
 /**
   * Test checkpoint for file system table factory with testcsv format.
   */
-@RunWith(classOf[Parameterized])
-class FsStreamingSinkTestCsvITCase(useBulkWriter: Boolean) extends FsStreamingSinkITCaseBase {
+class FsStreamingSinkTestCsvITCase extends FsStreamingSinkITCaseBase {
 
   override def additionalProperties(): Array[String] = {
-    super.additionalProperties() ++
-        Seq("'format' = 'testcsv'", s"'$USE_BULK_WRITER' = '$useBulkWriter'") ++
-        (if (useBulkWriter) Seq() else Seq("'sink.rolling-policy.file-size' = '1'"))
-  }
-}
-
-object FsStreamingSinkTestCsvITCase {
-  @Parameterized.Parameters(name = "useBulkWriter-{0}")
-  def parameters(): java.util.Collection[Boolean] = {
-    java.util.Arrays.asList(true, false)
+    super.additionalProperties() ++ Seq("'format' = 'testcsv'")
   }
 }

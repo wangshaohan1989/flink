@@ -18,12 +18,11 @@
 
 package org.apache.flink.table.planner.calcite
 
-import org.apache.flink.table.planner.plan.nodes.calcite.{LogicalExpand, LogicalRank, LogicalSink}
+import org.apache.flink.table.planner.plan.nodes.calcite.{LogicalExpand, LogicalRank}
 import org.apache.flink.table.runtime.operators.rank.{RankRange, RankType}
-import org.apache.flink.table.sinks.TableSink
 
 import org.apache.calcite.plan.Contexts
-import org.apache.calcite.rel.`type`.{RelDataType, RelDataTypeField}
+import org.apache.calcite.rel.`type`.RelDataTypeField
 import org.apache.calcite.rel.core.RelFactories
 import org.apache.calcite.rel.{RelCollation, RelNode}
 import org.apache.calcite.rex.RexNode
@@ -56,8 +55,6 @@ object FlinkRelFactories {
 
   val DEFAULT_RANK_FACTORY = new RankFactoryImpl
 
-  val DEFAULT_SINK_FACTORY = new SinkFactoryImpl
-
   /**
     * Can create a [[LogicalExpand]] of the
     * appropriate type for this rule's calling convention.
@@ -65,7 +62,6 @@ object FlinkRelFactories {
   trait ExpandFactory {
     def createExpand(
         input: RelNode,
-        rowType: RelDataType,
         projects: util.List[util.List[RexNode]],
         expandIdIndex: Int): RelNode
   }
@@ -76,9 +72,10 @@ object FlinkRelFactories {
   class ExpandFactoryImpl extends ExpandFactory {
     def createExpand(
         input: RelNode,
-        rowType: RelDataType,
         projects: util.List[util.List[RexNode]],
-        expandIdIndex: Int): RelNode = LogicalExpand.create(input, rowType, projects, expandIdIndex)
+        expandIdIndex: Int): RelNode = {
+      LogicalExpand.create(input, projects, expandIdIndex)
+    }
   }
 
   /**
@@ -111,28 +108,5 @@ object FlinkRelFactories {
       LogicalRank.create(input, partitionKey, orderKey, rankType, rankRange,
         rankNumberType, outputRankNumber)
     }
-  }
-
-  /**
-    * Can create a [[LogicalSink]] of the
-    * appropriate type for this rule's calling convention.
-    */
-  trait SinkFactory {
-
-    def createSink(
-        input: RelNode,
-        sink: TableSink[_],
-        sinkName: String): RelNode
-  }
-
-  /**
-    * Implementation of [[SinkFactory]] that returns a [[LogicalSink]].
-    */
-  class SinkFactoryImpl extends SinkFactory {
-
-    def createSink(
-        input: RelNode,
-        sink: TableSink[_],
-        sinkName: String): RelNode = LogicalSink.create(input, sink, sinkName)
   }
 }

@@ -38,253 +38,266 @@ import java.util.List;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 import static junit.framework.TestCase.assertTrue;
+import static org.hamcrest.Matchers.equalTo;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertThat;
 import static org.junit.Assert.fail;
 
-/**
- * Tests of {@link WatermarkAssignerOperator}.
- */
+/** Tests of {@link WatermarkAssignerOperator}. */
 public class WatermarkAssignerOperatorTest extends WatermarkAssignerOperatorTestBase {
 
-	private static final WatermarkGenerator WATERMARK_GENERATOR = new BoundedOutOfOrderWatermarkGenerator(0, 1);
+    private static final WatermarkGenerator WATERMARK_GENERATOR =
+            new BoundedOutOfOrderWatermarkGenerator(0, 1);
 
-	@Test
-	public void testWatermarkAssignerWithIdleSource() throws Exception {
-		// with timeout 1000 ms
-		OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = createTestHarness(0, WATERMARK_GENERATOR, 1000);
-		testHarness.getExecutionConfig().setAutoWatermarkInterval(50);
-		testHarness.open();
+    @Test
+    public void testWatermarkAssignerWithIdleSource() throws Exception {
+        // with timeout 1000 ms
+        OneInputStreamOperatorTestHarness<RowData, RowData> testHarness =
+                createTestHarness(0, WATERMARK_GENERATOR, 1000);
+        testHarness.getExecutionConfig().setAutoWatermarkInterval(50);
+        testHarness.open();
 
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(1L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(2L)));
-		testHarness.processWatermark(new Watermark(2)); // this watermark should be ignored
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(3L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L)));
+        ConcurrentLinkedQueue<Object> output = testHarness.getOutput();
+        List<Object> expectedOutput = new ArrayList<>();
 
-		// trigger watermark emit
-		testHarness.setProcessingTime(51);
-		ConcurrentLinkedQueue<Object> output = testHarness.getOutput();
-		List<Watermark> watermarks = extractWatermarks(output);
-		assertEquals(1, watermarks.size());
-		assertEquals(new Watermark(3), watermarks.get(0));
-		assertEquals(StreamStatus.ACTIVE, testHarness.getStreamStatus());
-		output.clear();
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(1L)));
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(2L)));
+        testHarness.processWatermark(new Watermark(2)); // this watermark should be ignored
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(3L)));
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L)));
 
-		testHarness.setProcessingTime(1001);
-		assertEquals(StreamStatus.IDLE, testHarness.getStreamStatus());
+        // trigger watermark emit
+        testHarness.setProcessingTime(51);
+        expectedOutput.add(new Watermark(3));
+        assertThat(filterOutRecords(output), equalTo(expectedOutput));
 
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(5L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(6L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(7L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(8L)));
+        testHarness.setProcessingTime(1001);
+        expectedOutput.add(StreamStatus.IDLE);
+        assertThat(filterOutRecords(output), equalTo(expectedOutput));
 
-		assertEquals(StreamStatus.ACTIVE, testHarness.getStreamStatus());
-		testHarness.setProcessingTime(1060);
-		output = testHarness.getOutput();
-		watermarks = extractWatermarks(output);
-		assertEquals(1, watermarks.size());
-		assertEquals(new Watermark(7), watermarks.get(0));
-	}
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L)));
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(5L)));
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(6L)));
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(7L)));
+        expectedOutput.add(StreamStatus.ACTIVE);
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(8L)));
 
-	@Test
-	public void testWatermarkAssignerOperator() throws Exception {
-		OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = createTestHarness(0, WATERMARK_GENERATOR, -1);
+        testHarness.setProcessingTime(1060);
+        expectedOutput.add(new Watermark(7));
+        assertThat(filterOutRecords(output), equalTo(expectedOutput));
+    }
 
-		testHarness.getExecutionConfig().setAutoWatermarkInterval(50);
+    @Test
+    public void testWatermarkAssignerOperator() throws Exception {
+        OneInputStreamOperatorTestHarness<RowData, RowData> testHarness =
+                createTestHarness(0, WATERMARK_GENERATOR, -1);
 
-		long currentTime = 0;
+        testHarness.getExecutionConfig().setAutoWatermarkInterval(50);
 
-		testHarness.open();
+        long currentTime = 0;
 
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(1L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(2L)));
-		testHarness.processWatermark(new Watermark(2)); // this watermark should be ignored
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(3L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L)));
+        testHarness.open();
 
-		// validate first part of the sequence. we poll elements until our
-		// watermark updates to "3", which must be the result of the "4" element.
-		{
-			ConcurrentLinkedQueue<Object> output = testHarness.getOutput();
-			long nextElementValue = 1L;
-			long lastWatermark = -1L;
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(1L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(2L)));
+        testHarness.processWatermark(new Watermark(2)); // this watermark should be ignored
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(3L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L)));
 
-			while (lastWatermark < 3) {
-				if (output.size() > 0) {
-					Object next = output.poll();
-					assertNotNull(next);
-					Tuple2<Long, Long> update = validateElement(next, nextElementValue, lastWatermark);
-					nextElementValue = update.f0;
-					lastWatermark = update.f1;
+        // validate first part of the sequence. we poll elements until our
+        // watermark updates to "3", which must be the result of the "4" element.
+        {
+            ConcurrentLinkedQueue<Object> output = testHarness.getOutput();
+            long nextElementValue = 1L;
+            long lastWatermark = -1L;
 
-					// check the invariant
-					assertTrue(lastWatermark < nextElementValue);
-				} else {
-					currentTime = currentTime + 10;
-					testHarness.setProcessingTime(currentTime);
-				}
-			}
+            while (lastWatermark < 3) {
+                if (output.size() > 0) {
+                    Object next = output.poll();
+                    assertNotNull(next);
+                    Tuple2<Long, Long> update =
+                            validateElement(next, nextElementValue, lastWatermark);
+                    nextElementValue = update.f0;
+                    lastWatermark = update.f1;
 
-			output.clear();
-		}
+                    // check the invariant
+                    assertTrue(lastWatermark < nextElementValue);
+                } else {
+                    currentTime = currentTime + 10;
+                    testHarness.setProcessingTime(currentTime);
+                }
+            }
 
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(5L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(6L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(7L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(8L)));
+            output.clear();
+        }
 
-		// validate the next part of the sequence. we poll elements until our
-		// watermark updates to "7", which must be the result of the "8" element.
-		{
-			ConcurrentLinkedQueue<Object> output = testHarness.getOutput();
-			long nextElementValue = 4L;
-			long lastWatermark = 2L;
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(5L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(6L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(7L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(8L)));
 
-			while (lastWatermark < 7) {
-				if (output.size() > 0) {
-					Object next = output.poll();
-					assertNotNull(next);
-					Tuple2<Long, Long> update = validateElement(next, nextElementValue, lastWatermark);
-					nextElementValue = update.f0;
-					lastWatermark = update.f1;
+        // validate the next part of the sequence. we poll elements until our
+        // watermark updates to "7", which must be the result of the "8" element.
+        {
+            ConcurrentLinkedQueue<Object> output = testHarness.getOutput();
+            long nextElementValue = 4L;
+            long lastWatermark = 2L;
 
-					// check the invariant
-					assertTrue(lastWatermark < nextElementValue);
-				} else {
-					currentTime = currentTime + 10;
-					testHarness.setProcessingTime(currentTime);
-				}
-			}
+            while (lastWatermark < 7) {
+                if (output.size() > 0) {
+                    Object next = output.poll();
+                    assertNotNull(next);
+                    Tuple2<Long, Long> update =
+                            validateElement(next, nextElementValue, lastWatermark);
+                    nextElementValue = update.f0;
+                    lastWatermark = update.f1;
 
-			output.clear();
-		}
+                    // check the invariant
+                    assertTrue(lastWatermark < nextElementValue);
+                } else {
+                    currentTime = currentTime + 10;
+                    testHarness.setProcessingTime(currentTime);
+                }
+            }
 
-		testHarness.processWatermark(new Watermark(Long.MAX_VALUE));
-		assertEquals(Long.MAX_VALUE, ((Watermark) testHarness.getOutput().poll()).getTimestamp());
-	}
+            output.clear();
+        }
 
-	@Test
-	public void testCustomizedWatermarkGenerator() throws Exception {
-		MyWatermarkGenerator.openCalled = false;
-		MyWatermarkGenerator.closeCalled = false;
-		WatermarkGenerator generator = new MyWatermarkGenerator(1);
+        testHarness.processWatermark(new Watermark(Long.MAX_VALUE));
+        assertEquals(Long.MAX_VALUE, ((Watermark) testHarness.getOutput().poll()).getTimestamp());
+    }
 
-		OneInputStreamOperatorTestHarness<RowData, RowData> testHarness = createTestHarness(0, generator, -1);
+    @Test
+    public void testCustomizedWatermarkGenerator() throws Exception {
+        MyWatermarkGenerator.openCalled = false;
+        MyWatermarkGenerator.closeCalled = false;
+        WatermarkGenerator generator = new MyWatermarkGenerator(1);
 
-		testHarness.getExecutionConfig().setAutoWatermarkInterval(5);
+        OneInputStreamOperatorTestHarness<RowData, RowData> testHarness =
+                createTestHarness(0, generator, -1);
 
-		long currentTime = 0;
-		List<Watermark> expected = new ArrayList<>();
+        testHarness.getExecutionConfig().setAutoWatermarkInterval(5);
 
-		testHarness.open();
+        long currentTime = 0;
+        List<Watermark> expected = new ArrayList<>();
 
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(1L, 0L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(2L, 1L)));
-		testHarness.processWatermark(new Watermark(2)); // this watermark should be ignored
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(3L, 1L)));
-		currentTime = currentTime + 5;
-		testHarness.setProcessingTime(currentTime);
-		expected.add(new Watermark(1L));
+        testHarness.open();
 
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L, 2L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(2L, 1L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(1L, 0L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(6L, null)));
-		currentTime = currentTime + 5;
-		testHarness.setProcessingTime(currentTime);
-		expected.add(new Watermark(2L));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(1L, 0L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(2L, 1L)));
+        testHarness.processWatermark(new Watermark(2)); // this watermark should be ignored
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(3L, 1L)));
+        currentTime = currentTime + 5;
+        testHarness.setProcessingTime(currentTime);
+        expected.add(new Watermark(1L));
 
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(9L, 8L)));
-		expected.add(new Watermark(8L));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(4L, 2L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(2L, 1L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(1L, 0L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(6L, null)));
+        currentTime = currentTime + 5;
+        testHarness.setProcessingTime(currentTime);
+        expected.add(new Watermark(2L));
 
-		// no watermark output
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(8L, 7L)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(10L, null)));
-		testHarness.processElement(new StreamRecord<>(GenericRowData.of(11L, 10L)));
-		currentTime = currentTime + 5;
-		testHarness.setProcessingTime(currentTime);
-		expected.add(new Watermark(10L));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(9L, 8L)));
+        expected.add(new Watermark(8L));
 
-		testHarness.close();
-		expected.add(Watermark.MAX_WATERMARK);
+        // no watermark output
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(8L, 7L)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(10L, null)));
+        testHarness.processElement(new StreamRecord<>(GenericRowData.of(11L, 10L)));
+        currentTime = currentTime + 5;
+        testHarness.setProcessingTime(currentTime);
+        expected.add(new Watermark(10L));
 
-		// num_watermark + num_records
-		assertEquals(expected.size() + 11, testHarness.getOutput().size());
-		List<Watermark> results = extractWatermarks(testHarness.getOutput());
-		assertEquals(expected, results);
-		assertTrue(MyWatermarkGenerator.openCalled);
-		assertTrue(MyWatermarkGenerator.closeCalled);
-	}
+        testHarness.close();
+        expected.add(Watermark.MAX_WATERMARK);
 
-	private static OneInputStreamOperatorTestHarness<RowData, RowData> createTestHarness(
-		int rowtimeFieldIndex,
-		WatermarkGenerator watermarkGenerator,
-		long idleTimeout) throws Exception {
+        // num_watermark + num_records
+        assertEquals(expected.size() + 11, testHarness.getOutput().size());
+        List<Watermark> results = extractWatermarks(testHarness.getOutput());
+        assertEquals(expected, results);
+        assertTrue(MyWatermarkGenerator.openCalled);
+        assertTrue(MyWatermarkGenerator.closeCalled);
+    }
 
-		return new OneInputStreamOperatorTestHarness<>(
-			new WatermarkAssignerOperatorFactory(
-				rowtimeFieldIndex,
-				idleTimeout,
-				new GeneratedWatermarkGenerator(watermarkGenerator.getClass().getName(), "", new Object[]{}) {
-					@Override
-					public WatermarkGenerator newInstance(ClassLoader classLoader) {
-						return watermarkGenerator;
-					}
+    private static OneInputStreamOperatorTestHarness<RowData, RowData> createTestHarness(
+            int rowtimeFieldIndex, WatermarkGenerator watermarkGenerator, long idleTimeout)
+            throws Exception {
 
-					public WatermarkGenerator newInstance(ClassLoader classLoader, Object... args) {
-						return watermarkGenerator;
-					}
-				}));
-	}
+        return new OneInputStreamOperatorTestHarness<>(
+                new WatermarkAssignerOperatorFactory(
+                        rowtimeFieldIndex,
+                        idleTimeout,
+                        new GeneratedWatermarkGenerator(
+                                watermarkGenerator.getClass().getName(), "", new Object[] {}) {
+                            @Override
+                            public WatermarkGenerator newInstance(ClassLoader classLoader) {
+                                return watermarkGenerator;
+                            }
 
-	/**
-	 * The special watermark generator will generate null watermarks and
-	 * also checks open&close are called.
-	 */
-	private static final class MyWatermarkGenerator extends WatermarkGenerator {
+                            public WatermarkGenerator newInstance(
+                                    ClassLoader classLoader, Object... args) {
+                                return watermarkGenerator;
+                            }
+                        }));
+    }
 
-		private static final long serialVersionUID = 1L;
-		private static boolean openCalled = false;
-		private static boolean closeCalled = false;
+    /**
+     * The special watermark generator will generate null watermarks and also checks open&close are
+     * called.
+     */
+    private static final class MyWatermarkGenerator extends WatermarkGenerator {
 
-		private final int watermarkFieldIndex;
+        private static final long serialVersionUID = 1L;
+        private static boolean openCalled = false;
+        private static boolean closeCalled = false;
 
-		private MyWatermarkGenerator(int watermarkFieldIndex) {
-			this.watermarkFieldIndex = watermarkFieldIndex;
-		}
+        private final int watermarkFieldIndex;
 
-		@Override
-		public void open(Configuration parameters) throws Exception {
-			super.open(parameters);
-			if (closeCalled) {
-				fail("Close called before open.");
-			}
-			openCalled = true;
-		}
+        private MyWatermarkGenerator(int watermarkFieldIndex) {
+            this.watermarkFieldIndex = watermarkFieldIndex;
+        }
 
-		@Nullable
-		@Override
-		public Long currentWatermark(RowData row) throws Exception {
-			if (!openCalled) {
-				fail("Open was not called before run.");
-			}
-			if (row.isNullAt(watermarkFieldIndex)) {
-				return null;
-			} else {
-				return row.getLong(watermarkFieldIndex);
-			}
-		}
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            super.open(parameters);
+            if (closeCalled) {
+                fail("Close called before open.");
+            }
+            openCalled = true;
+        }
 
-		@Override
-		public void close() throws Exception {
-			super.close();
-			if (!openCalled) {
-				fail("Open was not called before close.");
-			}
-			closeCalled = true;
-		}
-	}
+        @Nullable
+        @Override
+        public Long currentWatermark(RowData row) throws Exception {
+            if (!openCalled) {
+                fail("Open was not called before run.");
+            }
+            if (row.isNullAt(watermarkFieldIndex)) {
+                return null;
+            } else {
+                return row.getLong(watermarkFieldIndex);
+            }
+        }
+
+        @Override
+        public void close() throws Exception {
+            super.close();
+            if (!openCalled) {
+                fail("Open was not called before close.");
+            }
+            closeCalled = true;
+        }
+    }
 }

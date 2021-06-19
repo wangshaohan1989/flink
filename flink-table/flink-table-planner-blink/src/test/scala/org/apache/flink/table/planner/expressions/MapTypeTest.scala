@@ -18,15 +18,14 @@
 
 package org.apache.flink.table.planner.expressions
 
-import org.apache.flink.table.api.DataTypes
-import org.apache.flink.table.api.scala._
+import org.apache.flink.table.api.{DataTypes, _}
 import org.apache.flink.table.expressions.ApiExpressionUtils.valueLiteral
 import org.apache.flink.table.planner.expressions.utils.MapTypeTestBase
 import org.apache.flink.table.planner.utils.DateTimeTestUtil.{localDate, localDateTime, localTime => gLocalTime}
 
-import java.time.{LocalDateTime => JLocalTimestamp}
-
 import org.junit.Test
+
+import java.time.{LocalDateTime => JLocalTimestamp}
 
 class MapTypeTest extends MapTypeTestBase {
 
@@ -46,6 +45,7 @@ class MapTypeTest extends MapTypeTestBase {
     testSqlApi("f2['b']", "13")
     testSqlApi("f3[1]", "null")
     testSqlApi("f3[12]", "a")
+    testSqlApi("f2[f3[12]]", "12")
   }
 
   @Test

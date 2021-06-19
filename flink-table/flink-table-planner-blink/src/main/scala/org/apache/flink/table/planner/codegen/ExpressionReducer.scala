@@ -19,23 +19,21 @@
 package org.apache.flink.table.planner.codegen
 
 import org.apache.flink.api.common.functions.{MapFunction, RichMapFunction}
-import org.apache.flink.configuration.Configuration
-import org.apache.flink.metrics.MetricGroup
 import org.apache.flink.table.api.{TableConfig, TableException}
 import org.apache.flink.table.data.binary.{BinaryStringData, BinaryStringDataUtil}
 import org.apache.flink.table.data.{DecimalData, GenericRowData, TimestampData}
-import org.apache.flink.table.functions.{FunctionContext, UserDefinedFunction}
+import org.apache.flink.table.functions.{ConstantFunctionContext, FunctionContext, UserDefinedFunction}
 import org.apache.flink.table.planner.calcite.FlinkTypeFactory
 import org.apache.flink.table.planner.codegen.FunctionCodeGenerator.generateFunction
 import org.apache.flink.table.planner.plan.utils.PythonUtil.containsPythonCall
+import org.apache.flink.table.planner.utils.Logging
+import org.apache.flink.table.types.DataType
 import org.apache.flink.table.types.logical.RowType
 import org.apache.flink.table.util.TimestampStringUtils.fromLocalDateTime
 
 import org.apache.calcite.avatica.util.ByteString
 import org.apache.calcite.rex.{RexBuilder, RexExecutor, RexNode}
 import org.apache.calcite.sql.`type`.SqlTypeName
-
-import java.io.File
 
 import scala.collection.JavaConverters._
 import scala.collection.mutable.ListBuffer
@@ -50,7 +48,8 @@ import scala.collection.mutable.ListBuffer
 class ExpressionReducer(
     config: TableConfig,
     allowChangeNullability: Boolean = false)
-  extends RexExecutor {
+  extends RexExecutor
+  with Logging {
 
   private val EMPTY_ROW_TYPE = RowType.of()
   private val EMPTY_ROW = new GenericRowData(0)
@@ -72,7 +71,9 @@ class ExpressionReducer(
 
       // we don't support object literals yet, we skip those constant expressions
       case (SqlTypeName.ANY, _) |
+           (SqlTypeName.OTHER, _) |
            (SqlTypeName.ROW, _) |
+           (SqlTypeName.STRUCTURED, _) |
            (SqlTypeName.ARRAY, _) |
            (SqlTypeName.MAP, _) |
            (SqlTypeName.MULTISET, _) => None
@@ -116,6 +117,16 @@ class ExpressionReducer(
       richMapFunction.open(parameters)
       // execute
       richMapFunction.map(EMPTY_ROW)
+    } catch { case t: Throwable =>
+      // maybe a function accesses some cluster specific context information
+      // skip the expression reduction and try it again during runtime
+      LOG.warn(
+        "Unable to perform constant expression reduction. " +
+          "An exception occurred during the evaluation. " +
+          "One or more expressions will be executed unreduced.",
+        t)
+      reducedValues.addAll(constExprs)
+      return
     } finally {
       richMapFunction.close()
     }
@@ -133,7 +144,9 @@ class ExpressionReducer(
         unreduced.getType.getSqlTypeName match {
           // we insert the original expression for object literals
           case SqlTypeName.ANY |
+               SqlTypeName.OTHER |
                SqlTypeName.ROW |
+               SqlTypeName.STRUCTURED |
                SqlTypeName.ARRAY |
                SqlTypeName.MAP |
                SqlTypeName.MULTISET =>
@@ -234,35 +247,6 @@ class ExpressionReducer(
 }
 
 /**
-  * A [[ConstantFunctionContext]] allows to obtain user-defined configuration information set
-  * in [[TableConfig]].
-  *
-  * @param parameters User-defined configuration set in [[TableConfig]].
-  */
-class ConstantFunctionContext(parameters: Configuration) extends FunctionContext(null) {
-
-  override def getMetricGroup: MetricGroup = {
-    throw new UnsupportedOperationException("getMetricGroup is not supported when optimizing")
-  }
-
-  override def getCachedFile(name: String): File = {
-    throw new UnsupportedOperationException("getCachedFile is not supported when optimizing")
-  }
-
-  /**
-    * Gets the user-defined configuration value associated with the given key as a string.
-    *
-    * @param key          key pointing to the associated value
-    * @param defaultValue default value which is returned in case user-defined configuration
-    *                     value is null or there is no value associated with the given key
-    * @return (default) value associated with the given key
-    */
-  override def getJobParameter(key: String, defaultValue: String): String = {
-    parameters.getString(key, defaultValue)
-  }
-}
-
-/**
   * Constant expression code generator context.
   */
 class ConstantCodeGeneratorContext(tableConfig: TableConfig)
@@ -272,5 +256,12 @@ class ConstantCodeGeneratorContext(tableConfig: TableConfig)
       functionContextClass: Class[_ <: FunctionContext] = classOf[FunctionContext],
       runtimeContextTerm: String = null): String = {
     super.addReusableFunction(function, classOf[ConstantFunctionContext], "parameters")
+  }
+
+  override def addReusableConverter(
+      dataType: DataType,
+      classLoaderTerm: String = null)
+    : String = {
+    super.addReusableConverter(dataType, "this.getClass().getClassLoader()")
   }
 }

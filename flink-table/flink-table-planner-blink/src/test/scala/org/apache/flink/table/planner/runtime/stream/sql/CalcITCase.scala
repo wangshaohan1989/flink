@@ -22,17 +22,33 @@ import org.apache.flink.api.common.typeinfo.TypeInformation
 import org.apache.flink.api.java.typeutils.RowTypeInfo
 import org.apache.flink.api.scala._
 import org.apache.flink.api.scala.typeutils.Types
-import org.apache.flink.table.api.scala._
-import org.apache.flink.table.data.{GenericRowData, RowData}
+import org.apache.flink.table.api._
+import org.apache.flink.table.api.bridge.scala._
+import org.apache.flink.table.api.internal.TableEnvironmentInternal
+import org.apache.flink.table.data.{GenericRowData, MapData, RowData}
+import org.apache.flink.table.planner.factories.TestValuesTableFactory
+import org.apache.flink.table.planner.runtime.utils.BatchTestBase.row
 import org.apache.flink.table.planner.runtime.utils._
-import org.apache.flink.table.runtime.typeutils.RowDataTypeInfo
+import org.apache.flink.table.runtime.typeutils.InternalTypeInfo
+import org.apache.flink.table.runtime.typeutils.MapDataSerializerTest.CustomMapData
 import org.apache.flink.table.types.logical.{BigIntType, IntType, VarCharType}
+import org.apache.flink.table.utils.LegacyRowResource
+import org.apache.flink.test.util.TestBaseUtils
 import org.apache.flink.types.Row
+import org.apache.flink.util.CollectionUtil
 
+import java.util
 import org.junit.Assert._
 import org.junit._
 
+import java.time.Instant
+import scala.collection.JavaConversions._
+import scala.collection.Seq
+
 class CalcITCase extends StreamingTestBase {
+
+  @Rule
+  def usesLegacyRows: LegacyRowResource = LegacyRowResource.INSTANCE
 
   @Test
   def testGenericRowAndRowData(): Unit = {
@@ -46,7 +62,7 @@ class CalcITCase extends StreamingTestBase {
     val data = List(rowData)
 
     implicit val tpe: TypeInformation[GenericRowData] =
-      new RowDataTypeInfo(
+      InternalTypeInfo.ofFields(
         new IntType(),
         new IntType(),
         new BigIntType()).asInstanceOf[TypeInformation[GenericRowData]]
@@ -56,7 +72,7 @@ class CalcITCase extends StreamingTestBase {
     val t = ds.toTable(tEnv, 'a, 'b, 'c)
     tEnv.registerTable("MyTableRow", t)
 
-    val outputType = new RowDataTypeInfo(
+    val outputType = InternalTypeInfo.ofFields(
       new IntType(),
       new IntType(),
       new BigIntType())
@@ -89,7 +105,7 @@ class CalcITCase extends StreamingTestBase {
     val t = ds.toTable(tEnv, 'a, 'b, 'c)
     tEnv.registerTable("MyTableRow", t)
 
-    val outputType = new RowDataTypeInfo(
+    val outputType = InternalTypeInfo.ofFields(
       new VarCharType(VarCharType.MAX_LENGTH),
       new VarCharType(VarCharType.MAX_LENGTH),
       new IntType())
@@ -115,7 +131,7 @@ class CalcITCase extends StreamingTestBase {
     val data = List(rowData)
 
     implicit val tpe: TypeInformation[GenericRowData] =
-      new RowDataTypeInfo(
+      InternalTypeInfo.ofFields(
         new IntType(),
         new IntType(),
         new BigIntType()).asInstanceOf[TypeInformation[GenericRowData]]
@@ -210,14 +226,13 @@ class CalcITCase extends StreamingTestBase {
       ((0, 0), "0"),
       ((1, 1), "1"),
       ((2, 2), "2")
-    )))
+    )), '_1, '_2)
     tEnv.registerTable("MyTable", table)
 
     val result = tEnv.sqlQuery(sqlQuery)
     val sink = TestSinkUtil.configureSink(result, new TestingAppendTableSink())
-    tEnv.registerTableSink("MySink", sink)
-    tEnv.insertInto("MySink", result)
-    tEnv.execute("test")
+    tEnv.asInstanceOf[TableEnvironmentInternal].registerTableSinkInternal("MySink", sink)
+    table.executeInsert("MySink").await()
 
     val expected = List("0,0,0", "1,1,1", "2,2,2")
     assertEquals(expected.sorted, sink.getAppendResults.sorted)
@@ -284,4 +299,236 @@ class CalcITCase extends StreamingTestBase {
       assertEquals(expected, result)
     )
   }
+
+  @Test
+  def testSourceWithCustomInternalData(): Unit = {
+
+    def createMapData(k: Long, v: Long): MapData = {
+      val mapData = new util.HashMap[Long, Long]()
+      mapData.put(k, v)
+      new CustomMapData(mapData)
+    }
+
+    val rowData1: GenericRowData = new GenericRowData(2)
+    rowData1.setField(0, 1L)
+    rowData1.setField(1, createMapData(1L, 2L))
+    val rowData2: GenericRowData = new GenericRowData(2)
+    rowData2.setField(0, 2L)
+    rowData2.setField(1, createMapData(4L, 5L))
+    val values = List(rowData1, rowData2)
+
+    val myTableDataId = TestValuesTableFactory.registerRowData(values)
+
+    val ddl =
+      s"""
+         |CREATE TABLE CustomTable (
+         |  a bigint,
+         |  b map<bigint, bigint>
+         |) WITH (
+         |  'connector' = 'values',
+         |  'data-id' = '$myTableDataId',
+         |  'register-internal-data' = 'true',
+         |  'bounded' = 'true'
+         |)
+       """.stripMargin
+
+    env.getConfig.disableObjectReuse()
+    tEnv.executeSql(ddl)
+    val result = tEnv.executeSql( "select a, b from CustomTable")
+
+    val expected = List("1,{1=2}", "2,{4=5}")
+    val actual = CollectionUtil.iteratorToList(result.collect()).map(r => r.toString)
+    assertEquals(expected.sorted, actual.sorted)
+  }
+
+  @Test
+  def testSimpleProject(): Unit = {
+    val myTableDataId = TestValuesTableFactory.registerData(TestData.smallData3)
+    val ddl =
+      s"""
+         |CREATE TABLE SimpleTable (
+         |  a int,
+         |  b bigint,
+         |  c string
+         |) WITH (
+         |  'connector' = 'values',
+         |  'data-id' = '$myTableDataId',
+         |  'bounded' = 'true'
+         |)
+       """.stripMargin
+    tEnv.executeSql(ddl)
+
+    val result = tEnv.sqlQuery( "select a, c from SimpleTable").toAppendStream[Row]
+    val sink = new TestingAppendSink
+    result.addSink(sink)
+    env.execute()
+
+    val expected = List("1,Hi","2,Hello", "3,Hello world")
+    assertEquals(expected.sorted, sink.getAppendResults.sorted)
+  }
+
+  @Test
+  def testNestedProject(): Unit = {
+    val data = Seq(
+      row(1, row(row("HI", 11), row(111, true)), row("hi", 1111), "tom"),
+      row(2, row(row("HELLO", 22), row(222, false)), row("hello", 2222), "mary"),
+      row(3, row(row("HELLO WORLD", 33), row(333, true)), row("hello world", 3333), "benji")
+    )
+    val myTableDataId = TestValuesTableFactory.registerData(data)
+    val ddl =
+      s"""
+         |CREATE TABLE NestedTable (
+         |  id int,
+         |  deepNested row<nested1 row<name string, `value` int>,
+         |                 nested2 row<num int, flag boolean>>,
+         |  nested row<name string, `value` int>,
+         |  name string
+         |) WITH (
+         |  'connector' = 'values',
+         |  'nested-projection-supported' = 'false',
+         |  'data-id' = '$myTableDataId',
+         |  'bounded' = 'true'
+         |)
+       """.stripMargin
+    tEnv.executeSql(ddl)
+
+    val sqlQuery =
+      """
+        |select id,
+        |    deepNested.nested1.name AS nestedName,
+        |    nested.`value` AS nestedValue,
+        |    deepNested.nested2.flag AS nestedFlag,
+        |    deepNested.nested2.num AS nestedNum
+        |from NestedTable
+        |""".stripMargin
+    val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
+    val sink = new TestingAppendSink
+    result.addSink(sink)
+    env.execute()
+
+    val expected =
+      List("1,HI,1111,true,111","2,HELLO,2222,false,222", "3,HELLO WORLD,3333,true,333")
+    assertEquals(expected.sorted, sink.getAppendResults.sorted)
+  }
+
+  @Test
+  def testDecimalArrayWithDifferentPrecision(): Unit = {
+    val sqlQuery = "SELECT ARRAY[0.12, 0.5, 0.99]"
+
+    val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
+    val sink = new TestingAppendSink
+    result.addSink(sink)
+    env.execute()
+
+    val expected = List("[0.12, 0.50, 0.99]")
+    assertEquals(expected.sorted, sink.getAppendResults.sorted)
+  }
+
+  @Test
+  def testDecimalMapWithDifferentPrecision(): Unit = {
+    val sqlQuery = "SELECT Map['a', 0.12, 'b', 0.5]"
+
+    val result = tEnv.sqlQuery(sqlQuery).toAppendStream[Row]
+    val sink = new TestingAppendSink
+    result.addSink(sink)
+    env.execute()
+
+    val expected = List("{a=0.12, b=0.50}")
+    assertEquals(expected.sorted, sink.getAppendResults.sorted)
+  }
+
+  @Test
+  def testCurrentWatermark(): Unit = {
+    val rows = Seq(
+      row(1, Instant.ofEpochSecond(644326662L)),
+      row(2, Instant.ofEpochSecond(1622466300L)),
+      row(3, Instant.ofEpochSecond(1622466300L))
+    )
+    val tableId = TestValuesTableFactory.registerData(rows)
+
+    // We need a fixed timezone to make sure this test can run on machines across the world
+    tEnv.getConfig.getConfiguration.setString("table.local-time-zone", "Europe/Berlin")
+
+    tEnv.executeSql(s"""
+                       |CREATE TABLE T (
+                       |  id INT,
+                       |  ts TIMESTAMP_LTZ(3),
+                       |  WATERMARK FOR ts AS ts
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$tableId',
+                       |  'bounded' = 'true'
+                       |)
+       """.stripMargin)
+
+    // Table API
+    val result1 = tEnv.from("T")
+      .select($("id"), currentWatermark($("ts")))
+      .execute().collect().toList
+    TestBaseUtils.compareResultAsText(result1,
+      """1,null
+        |2,1990-06-02T11:37:42Z
+        |3,2021-05-31T13:05:00Z
+        |""".stripMargin)
+
+    // SQL
+    val result2 = tEnv.sqlQuery("SELECT id, CURRENT_WATERMARK(ts) FROM T")
+      .execute().collect().toList
+    TestBaseUtils.compareResultAsText(result2,
+      """1,null
+        |2,1990-06-02T11:37:42Z
+        |3,2021-05-31T13:05:00Z
+        |""".stripMargin)
+
+    val result3 = tEnv.sqlQuery(
+      """
+        |SELECT id FROM T WHERE CURRENT_WATERMARK(ts) IS NULL OR ts > CURRENT_WATERMARK(ts)
+        |""".stripMargin)
+      .execute().collect().toList
+    TestBaseUtils.compareResultAsText(result3,
+      """1
+        |2
+        |""".stripMargin)
+
+    val result4 = tEnv.sqlQuery(
+      """
+        |SELECT
+        |  TUMBLE_END(ts, INTERVAL '1' SECOND),
+        |  CURRENT_WATERMARK(ts)
+        |FROM T
+        |GROUP BY
+        |  TUMBLE(ts, INTERVAL '1' SECOND),
+        |  CURRENT_WATERMARK(ts)
+        |""".stripMargin)
+      .execute().collect().toList
+    TestBaseUtils.compareResultAsText(result4,
+      """1990-06-02T13:37:43,null
+        |2021-05-31T15:05:01,1990-06-02T11:37:42Z
+        |2021-05-31T15:05:01,2021-05-31T13:05:00Z
+        |""".stripMargin)
+  }
+
+  @Test
+  def testCurrentWatermarkForNonRowtimeAttribute(): Unit = {
+    val tableId = TestValuesTableFactory.registerData(Seq())
+    tEnv.executeSql(s"""
+                       |CREATE TABLE T (
+                       |  ts TIMESTAMP_LTZ(3)
+                       |) WITH (
+                       |  'connector' = 'values',
+                       |  'data-id' = '$tableId',
+                       |  'bounded' = 'true'
+                       |)
+       """.stripMargin)
+
+    try {
+      tEnv.sqlQuery("SELECT CURRENT_WATERMARK(ts) FROM T")
+      fail("CURRENT_WATERMARK for a non-rowtime attribute should have failed.");
+    } catch {
+      case e: Exception => assertEquals(
+        "SQL validation failed. Invalid function call:\n" +
+          "CURRENT_WATERMARK(TIMESTAMP_LTZ(3))", e.getMessage)
+    }
+  }
+
 }

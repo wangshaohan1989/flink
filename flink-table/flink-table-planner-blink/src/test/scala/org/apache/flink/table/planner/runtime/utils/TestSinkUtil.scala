@@ -25,13 +25,12 @@ import org.apache.flink.table.planner.runtime.utils.JavaPojos.Pojo1
 import org.apache.flink.table.planner.utils.TableTestUtil
 import org.apache.flink.table.runtime.types.TypeInfoLogicalTypeConverter
 import org.apache.flink.table.sinks.TableSink
-import org.apache.flink.table.utils.EncodingUtils
 import org.apache.flink.types.Row
-
 import org.apache.calcite.avatica.util.DateTimeUtils
-
 import java.sql.{Date, Time, Timestamp}
 import java.util.{Calendar, TimeZone}
+
+import org.apache.flink.util.StringUtils
 
 import scala.collection.JavaConverters._
 
@@ -58,7 +57,7 @@ object TestSinkUtil {
     field match {
       case _: Date | _: Time | _: Timestamp =>
         unixDateTimeToString(field, tz)
-      case _ => EncodingUtils.objectToString(field)
+      case _ => StringUtils.arrayAwareToString(field)
     }
   }
 
